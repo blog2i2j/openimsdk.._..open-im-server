@@ -9,9 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
-	clientv3 "go.etcd.io/etcd/client/v3"
-
 	"github.com/openimsdk/open-im-server/v3/internal/api/jssdk"
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/prommetrics"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/servererrs"
@@ -29,6 +28,7 @@ import (
 	"github.com/openimsdk/tools/discovery/etcd"
 	"github.com/openimsdk/tools/log"
 	"github.com/openimsdk/tools/mw"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const (
@@ -97,7 +97,7 @@ func newGinRouter(ctx context.Context, client discovery.Conn, cfg *Config) (*gin
 		r.Use(gzip.Gzip(gzip.BestSpeed))
 	}
 	r.Use(prommetricsGin(), gin.RecoveryWithWriter(gin.DefaultErrorWriter, mw.GinPanicErr), mw.CorsHandler(),
-		mw.GinParseOperationID(), GinParseToken(rpcli.NewAuthClient(authConn)))
+		mw.GinParseOperationID(), GinParseToken(rpcli.NewAuthClient(authConn)), setGinIsAdmin(cfg.Share.IMAdminUserID))
 
 	u := NewUserApi(user.NewUserClient(userConn), client, cfg.Discovery.RpcService)
 	{
@@ -250,6 +250,7 @@ func newGinRouter(ctx context.Context, client discovery.Conn, cfg *Config) (*gin
 		msgGroup.POST("/delete_msg_physical", m.DeleteMsgPhysical)
 
 		msgGroup.POST("/batch_send_msg", m.BatchSendMsg)
+		msgGroup.POST("/send_simple_msg", m.SendSimpleMessage)
 		msgGroup.POST("/check_msg_is_send_success", m.CheckMsgIsSendSuccess)
 		msgGroup.POST("/get_server_time", m.GetServerTime)
 	}
@@ -262,13 +263,12 @@ func newGinRouter(ctx context.Context, client discovery.Conn, cfg *Config) (*gin
 		conversationGroup.POST("/get_conversation", c.GetConversation)
 		conversationGroup.POST("/get_conversations", c.GetConversations)
 		conversationGroup.POST("/set_conversations", c.SetConversations)
-		conversationGroup.POST("/get_conversation_offline_push_user_ids", c.GetConversationOfflinePushUserIDs)
+		//conversationGroup.POST("/get_conversation_offline_push_user_ids", c.GetConversationOfflinePushUserIDs)
 		conversationGroup.POST("/get_full_conversation_ids", c.GetFullOwnerConversationIDs)
 		conversationGroup.POST("/get_incremental_conversations", c.GetIncrementalConversation)
 		conversationGroup.POST("/get_owner_conversation", c.GetOwnerConversation)
 		conversationGroup.POST("/get_not_notify_conversation_ids", c.GetNotNotifyConversationIDs)
 		conversationGroup.POST("/get_pinned_conversation_ids", c.GetPinnedConversationIDs)
-		conversationGroup.POST("/update_conversations_by_user", c.UpdateConversationsByUser)
 	}
 
 	{
@@ -312,7 +312,6 @@ func newGinRouter(ctx context.Context, client discovery.Conn, cfg *Config) (*gin
 		configGroup.POST("/get_config_list", cm.GetConfigList)
 		configGroup.POST("/get_config", cm.GetConfig)
 		configGroup.POST("/set_config", cm.SetConfig)
-		configGroup.POST("/set_configs", cm.SetConfigs)
 		configGroup.POST("/reset_config", cm.ResetConfig)
 		configGroup.POST("/set_enable_config_manager", cm.SetEnableConfigManager)
 		configGroup.POST("/get_enable_config_manager", cm.GetEnableConfigManager)
@@ -351,6 +350,12 @@ func GinParseToken(authClient *rpcli.AuthClient) gin.HandlerFunc {
 			c.Set(constant.OpUserID, resp.UserID)
 			c.Next()
 		}
+	}
+}
+
+func setGinIsAdmin(imAdminUserID []string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set(authverify.CtxAdminUserIDsKey, imAdminUserID)
 	}
 }
 
