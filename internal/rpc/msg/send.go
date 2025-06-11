@@ -17,6 +17,7 @@ package msg
 import (
 	"context"
 
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/common/prommetrics"
@@ -36,6 +37,9 @@ import (
 func (m *msgServer) SendMsg(ctx context.Context, req *pbmsg.SendMsgReq) (*pbmsg.SendMsgResp, error) {
 	if req.MsgData == nil {
 		return nil, errs.ErrArgs.WrapMsg("msgData is nil")
+	}
+	if err := authverify.CheckAccess(ctx, req.MsgData.SendID); err != nil {
+		return nil, err
 	}
 	before := new(*sdkws.MsgData)
 	resp, err := m.sendMsg(ctx, req, before)
@@ -82,7 +86,8 @@ func (m *msgServer) sendMsgGroupChat(ctx context.Context, req *pbmsg.SendMsgReq,
 		go m.setConversationAtInfo(ctx, req.MsgData)
 	}
 
-	m.webhookAfterSendGroupMsg(ctx, &m.config.WebhooksConfig.AfterSendGroupMsg, req)
+	// m.webhookAfterSendGroupMsg(ctx, &m.config.WebhooksConfig.AfterSendGroupMsg, req)
+
 	prommetrics.GroupChatMsgProcessSuccessCounter.Inc()
 	resp = &pbmsg.SendMsgResp{}
 	resp.SendTime = req.MsgData.SendTime
@@ -172,13 +177,7 @@ func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq
 	isSend := true
 	isNotification := msgprocessor.IsNotificationByMsg(req.MsgData)
 	if !isNotification {
-		isSend, err = m.modifyMessageByUserMessageReceiveOpt(
-			ctx,
-			req.MsgData.RecvID,
-			conversationutil.GenConversationIDForSingle(req.MsgData.SendID, req.MsgData.RecvID),
-			constant.SingleChatType,
-			req,
-		)
+		isSend, err = m.modifyMessageByUserMessageReceiveOpt(authverify.WithTempAdmin(ctx), req.MsgData.RecvID, conversationutil.GenConversationIDForSingle(req.MsgData.SendID, req.MsgData.RecvID), constant.SingleChatType, req)
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +193,8 @@ func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq
 			prommetrics.SingleChatMsgProcessFailedCounter.Inc()
 			return nil, err
 		}
-		m.webhookAfterSendSingleMsg(ctx, &m.config.WebhooksConfig.AfterSendSingleMsg, req)
+
+		// m.webhookAfterSendSingleMsg(ctx, &m.config.WebhooksConfig.AfterSendSingleMsg, req)
 		prommetrics.SingleChatMsgProcessSuccessCounter.Inc()
 		return &pbmsg.SendMsgResp{
 			ServerMsgID: req.MsgData.ServerMsgID,
@@ -202,4 +202,26 @@ func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq
 			SendTime:    req.MsgData.SendTime,
 		}, nil
 	}
+}
+
+func (m *msgServer) SendSimpleMsg(ctx context.Context, req *pbmsg.SendSimpleMsgReq) (*pbmsg.SendSimpleMsgResp, error) {
+	if req.MsgData == nil {
+		return nil, errs.ErrArgs.WrapMsg("msg data is nil")
+	}
+	sender, err := m.UserLocalCache.GetUserInfo(ctx, req.MsgData.SendID)
+	if err != nil {
+		return nil, err
+	}
+	req.MsgData.SenderFaceURL = sender.FaceURL
+	req.MsgData.SenderNickname = sender.Nickname
+	resp, err := m.SendMsg(ctx, &pbmsg.SendMsgReq{MsgData: req.MsgData})
+	if err != nil {
+		return nil, err
+	}
+	return &pbmsg.SendSimpleMsgResp{
+		ServerMsgID: resp.ServerMsgID,
+		ClientMsgID: resp.ClientMsgID,
+		SendTime:    resp.SendTime,
+		Modify:      resp.Modify,
+	}, nil
 }
