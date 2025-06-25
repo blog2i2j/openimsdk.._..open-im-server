@@ -49,7 +49,7 @@ type WsServer struct {
 	unregisterChan    chan *Client
 	kickHandlerChan   chan *kickHandler
 	clients           UserMap
-	online            *rpccache.OnlineCache
+	online            rpccache.OnlineCache
 	subscription      *Subscription
 	clientPool        sync.Pool
 	onlineUserNum     atomic.Int64
@@ -130,7 +130,7 @@ func NewWsServer(msgGatewayConfig *Config, opts ...Option) *WsServer {
 	for _, o := range opts {
 		o(&config)
 	}
-	//userRpcClient := rpcclient.NewUserRpcClient(client, config.Discovery.RpcService.User, config.Share.IMAdminUserID)
+	//userRpcClient := rpcclient.NewUserRpcClient(client, config.Discovery.RpcService.User, config.Share.IMAdminUser)
 
 	v := validator.New()
 	return &WsServer{
