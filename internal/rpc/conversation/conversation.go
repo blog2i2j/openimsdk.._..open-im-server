@@ -19,6 +19,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"github.com/openimsdk/open-im-server/v3/pkg/dbbuild"
 	"github.com/openimsdk/open-im-server/v3/pkg/rpcli"
 
@@ -30,7 +31,6 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/database/mgo"
-	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/model"
 	dbModel "github.com/openimsdk/open-im-server/v3/pkg/common/storage/model"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/webhook"
 	"github.com/openimsdk/open-im-server/v3/pkg/localcache"
@@ -68,7 +68,7 @@ type Config struct {
 	Discovery          config.Discovery
 }
 
-func Start(ctx context.Context, config *Config, client discovery.Conn, server grpc.ServiceRegistrar) error {
+func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryRegistry, server grpc.ServiceRegistrar) error {
 	dbb := dbbuild.NewBuilder(&config.MongodbConfig, &config.RedisConfig)
 	mgocli, err := dbb.Mongo(ctx)
 	if err != nil {
@@ -117,6 +117,9 @@ func Start(ctx context.Context, config *Config, client discovery.Conn, server gr
 }
 
 func (c *conversationServer) GetConversation(ctx context.Context, req *pbconversation.GetConversationReq) (*pbconversation.GetConversationResp, error) {
+	if err := authverify.CheckAccess(ctx, req.OwnerUserID); err != nil {
+		return nil, err
+	}
 	conversations, err := c.conversationDatabase.FindConversations(ctx, req.OwnerUserID, []string{req.ConversationID})
 	if err != nil {
 		return nil, err
@@ -130,7 +133,9 @@ func (c *conversationServer) GetConversation(ctx context.Context, req *pbconvers
 }
 
 func (c *conversationServer) GetSortedConversationList(ctx context.Context, req *pbconversation.GetSortedConversationListReq) (resp *pbconversation.GetSortedConversationListResp, err error) {
-	log.ZDebug(ctx, "GetSortedConversationList", "seqs", req, "userID", req.UserID)
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	var conversationIDs []string
 	if len(req.ConversationIDs) == 0 {
 		conversationIDs, err = c.conversationDatabase.GetConversationIDs(ctx, req.UserID)
@@ -203,6 +208,9 @@ func (c *conversationServer) GetSortedConversationList(ctx context.Context, req 
 }
 
 func (c *conversationServer) GetAllConversations(ctx context.Context, req *pbconversation.GetAllConversationsReq) (*pbconversation.GetAllConversationsResp, error) {
+	if err := authverify.CheckAccess(ctx, req.OwnerUserID); err != nil {
+		return nil, err
+	}
 	conversations, err := c.conversationDatabase.GetUserAllConversation(ctx, req.OwnerUserID)
 	if err != nil {
 		return nil, err
@@ -213,6 +221,9 @@ func (c *conversationServer) GetAllConversations(ctx context.Context, req *pbcon
 }
 
 func (c *conversationServer) GetConversations(ctx context.Context, req *pbconversation.GetConversationsReq) (*pbconversation.GetConversationsResp, error) {
+	if err := authverify.CheckAccess(ctx, req.OwnerUserID); err != nil {
+		return nil, err
+	}
 	conversations, err := c.getConversations(ctx, req.OwnerUserID, req.ConversationIDs)
 	if err != nil {
 		return nil, err
@@ -232,8 +243,14 @@ func (c *conversationServer) getConversations(ctx context.Context, ownerUserID s
 	return convert.ConversationsDB2Pb(conversations), nil
 }
 
+// Deprecated
 func (c *conversationServer) SetConversation(ctx context.Context, req *pbconversation.SetConversationReq) (*pbconversation.SetConversationResp, error) {
+	if err := authverify.CheckAccess(ctx, req.GetConversation().GetUserID()); err != nil {
+		return nil, err
+	}
 	var conversation dbModel.Conversation
+	conversation.CreateTime = time.Now()
+
 	if err := datautil.CopyStructFields(&conversation, req.Conversation); err != nil {
 		return nil, err
 	}
@@ -247,10 +264,11 @@ func (c *conversationServer) SetConversation(ctx context.Context, req *pbconvers
 }
 
 func (c *conversationServer) SetConversations(ctx context.Context, req *pbconversation.SetConversationsReq) (*pbconversation.SetConversationsResp, error) {
-	if req.Conversation == nil {
-		return nil, errs.ErrArgs.WrapMsg("conversation must not be nil")
+	for _, userID := range req.UserIDs {
+		if err := authverify.CheckAccess(ctx, userID); err != nil {
+			return nil, err
+		}
 	}
-
 	if req.Conversation.ConversationType == constant.WriteGroupChatType {
 		groupInfo, err := c.groupClient.GetGroupInfo(ctx, req.Conversation.GroupID)
 		if err != nil {
@@ -284,6 +302,7 @@ func (c *conversationServer) SetConversations(ctx context.Context, req *pbconver
 	conversation.ConversationType = req.Conversation.ConversationType
 	conversation.UserID = req.Conversation.UserID
 	conversation.GroupID = req.Conversation.GroupID
+	conversation.CreateTime = time.Now()
 
 	m, conversation, err := UpdateConversationsMap(ctx, req)
 	if err != nil {
@@ -331,6 +350,9 @@ func (c *conversationServer) SetConversations(ctx context.Context, req *pbconver
 }
 
 func (c *conversationServer) UpdateConversationsByUser(ctx context.Context, req *pbconversation.UpdateConversationsByUserReq) (*pbconversation.UpdateConversationsByUserResp, error) {
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	m := make(map[string]any)
 	if req.Ex != nil {
 		m["ex"] = req.Ex.Value
@@ -343,16 +365,11 @@ func (c *conversationServer) UpdateConversationsByUser(ctx context.Context, req 
 	return &pbconversation.UpdateConversationsByUserResp{}, nil
 }
 
-// Get user IDs with "Do Not Disturb" enabled in super large groups.
-func (c *conversationServer) GetRecvMsgNotNotifyUserIDs(ctx context.Context, req *pbconversation.GetRecvMsgNotNotifyUserIDsReq) (*pbconversation.GetRecvMsgNotNotifyUserIDsResp, error) {
-	return nil, errs.New("deprecated")
-}
-
 // create conversation without notification for msg redis transfer.
-func (c *conversationServer) CreateSingleChatConversations(ctx context.Context,
-	req *pbconversation.CreateSingleChatConversationsReq,
-) (*pbconversation.CreateSingleChatConversationsResp, error) {
+func (c *conversationServer) CreateSingleChatConversations(ctx context.Context, req *pbconversation.CreateSingleChatConversationsReq) (*pbconversation.CreateSingleChatConversationsResp, error) {
 	var conversation dbModel.Conversation
+	conversation.CreateTime = time.Now()
+
 	switch req.ConversationType {
 	case constant.SingleChatType:
 		// sendUser create
@@ -360,6 +377,7 @@ func (c *conversationServer) CreateSingleChatConversations(ctx context.Context,
 		conversation.ConversationType = req.ConversationType
 		conversation.OwnerUserID = req.SendID
 		conversation.UserID = req.RecvID
+
 		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
 			return nil, err
 		}
@@ -375,6 +393,7 @@ func (c *conversationServer) CreateSingleChatConversations(ctx context.Context,
 		conversation2 := conversation
 		conversation2.OwnerUserID = req.RecvID
 		conversation2.UserID = req.SendID
+
 		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
 			return nil, err
 		}
@@ -390,6 +409,7 @@ func (c *conversationServer) CreateSingleChatConversations(ctx context.Context,
 		conversation.ConversationType = req.ConversationType
 		conversation.OwnerUserID = req.RecvID
 		conversation.UserID = req.SendID
+
 		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
 			return nil, err
 		}
@@ -411,6 +431,7 @@ func (c *conversationServer) CreateGroupChatConversations(ctx context.Context, r
 	conversation.ConversationID = msgprocessor.GetConversationIDBySessionType(constant.ReadGroupChatType, req.GroupID)
 	conversation.GroupID = req.GroupID
 	conversation.ConversationType = constant.ReadGroupChatType
+	conversation.CreateTime = time.Now()
 
 	if err := c.webhookBeforeCreateGroupChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateGroupChatConversations, &conversation); err != nil {
 		return nil, err
@@ -418,6 +439,9 @@ func (c *conversationServer) CreateGroupChatConversations(ctx context.Context, r
 
 	err := c.conversationDatabase.CreateGroupChatConversation(ctx, req.GroupID, req.UserIDs, &conversation)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.msgClient.SetUserConversationMaxSeq(ctx, conversation.ConversationID, req.UserIDs, 0); err != nil {
 		return nil, err
 	}
 
@@ -454,6 +478,9 @@ func (c *conversationServer) SetConversationMinSeq(ctx context.Context, req *pbc
 }
 
 func (c *conversationServer) GetConversationIDs(ctx context.Context, req *pbconversation.GetConversationIDsReq) (*pbconversation.GetConversationIDsResp, error) {
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	conversationIDs, err := c.conversationDatabase.GetConversationIDs(ctx, req.UserID)
 	if err != nil {
 		return nil, err
@@ -462,6 +489,9 @@ func (c *conversationServer) GetConversationIDs(ctx context.Context, req *pbconv
 }
 
 func (c *conversationServer) GetUserConversationIDsHash(ctx context.Context, req *pbconversation.GetUserConversationIDsHashReq) (*pbconversation.GetUserConversationIDsHashResp, error) {
+	if err := authverify.CheckAccess(ctx, req.OwnerUserID); err != nil {
+		return nil, err
+	}
 	hash, err := c.conversationDatabase.GetUserConversationIDsHash(ctx, req.OwnerUserID)
 	if err != nil {
 		return nil, err
@@ -469,10 +499,7 @@ func (c *conversationServer) GetUserConversationIDsHash(ctx context.Context, req
 	return &pbconversation.GetUserConversationIDsHashResp{Hash: hash}, nil
 }
 
-func (c *conversationServer) GetConversationsByConversationID(
-	ctx context.Context,
-	req *pbconversation.GetConversationsByConversationIDReq,
-) (*pbconversation.GetConversationsByConversationIDResp, error) {
+func (c *conversationServer) GetConversationsByConversationID(ctx context.Context, req *pbconversation.GetConversationsByConversationIDReq) (*pbconversation.GetConversationsByConversationIDResp, error) {
 	conversations, err := c.conversationDatabase.GetConversationsByConversationID(ctx, req.ConversationIDs)
 	if err != nil {
 		return nil, err
@@ -526,10 +553,7 @@ func (c *conversationServer) conversationSort(conversations map[int64]string, re
 	resp.ConversationElems = append(resp.ConversationElems, cons...)
 }
 
-func (c *conversationServer) getConversationInfo(
-	ctx context.Context,
-	chatLogs map[string]*sdkws.MsgData,
-	userID string) (map[string]*pbconversation.ConversationElem, error) {
+func (c *conversationServer) getConversationInfo(ctx context.Context, chatLogs map[string]*sdkws.MsgData, userID string) (map[string]*pbconversation.ConversationElem, error) {
 	var (
 		sendIDs         []string
 		groupIDs        []string
@@ -615,6 +639,11 @@ func (c *conversationServer) GetConversationNotReceiveMessageUserIDs(ctx context
 }
 
 func (c *conversationServer) UpdateConversation(ctx context.Context, req *pbconversation.UpdateConversationReq) (*pbconversation.UpdateConversationResp, error) {
+	for _, userID := range req.UserIDs {
+		if err := authverify.CheckAccess(ctx, userID); err != nil {
+			return nil, err
+		}
+	}
 	m := make(map[string]any)
 	if req.RecvMsgOpt != nil {
 		m["recv_msg_opt"] = req.RecvMsgOpt.Value
@@ -661,6 +690,9 @@ func (c *conversationServer) UpdateConversation(ctx context.Context, req *pbconv
 }
 
 func (c *conversationServer) GetOwnerConversation(ctx context.Context, req *pbconversation.GetOwnerConversationReq) (*pbconversation.GetOwnerConversationResp, error) {
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	total, conversations, err := c.conversationDatabase.GetOwnerConversation(ctx, req.UserID, req.Pagination)
 	if err != nil {
 		return nil, err
@@ -685,7 +717,7 @@ func (c *conversationServer) GetConversationsNeedClearMsg(ctx context.Context, _
 
 	maxPage := (num + batchNum - 1) / batchNum
 
-	temp := make([]*model.Conversation, 0, maxPage*batchNum)
+	temp := make([]*dbModel.Conversation, 0, maxPage*batchNum)
 
 	for pageNumber := 0; pageNumber < int(maxPage); pageNumber++ {
 		pagination := &sdkws.RequestPagination{
@@ -722,6 +754,9 @@ func (c *conversationServer) GetConversationsNeedClearMsg(ctx context.Context, _
 }
 
 func (c *conversationServer) GetNotNotifyConversationIDs(ctx context.Context, req *pbconversation.GetNotNotifyConversationIDsReq) (*pbconversation.GetNotNotifyConversationIDsResp, error) {
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	conversationIDs, err := c.conversationDatabase.GetNotNotifyConversationIDs(ctx, req.UserID)
 	if err != nil {
 		return nil, err
@@ -730,6 +765,9 @@ func (c *conversationServer) GetNotNotifyConversationIDs(ctx context.Context, re
 }
 
 func (c *conversationServer) GetPinnedConversationIDs(ctx context.Context, req *pbconversation.GetPinnedConversationIDsReq) (*pbconversation.GetPinnedConversationIDsResp, error) {
+	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
+		return nil, err
+	}
 	conversationIDs, err := c.conversationDatabase.GetPinnedConversationIDs(ctx, req.UserID)
 	if err != nil {
 		return nil, err
